@@ -1,0 +1,267 @@
+#!/usr/bin/env python
+
+import sys
+import argparse
+from killerzee import *
+#from utils.ezutils import *
+from signal import *
+from datetime import *
+from scapy.all import *
+from scapy.layers.ZWave import *
+from scapy.layers.gnuradio import *
+#from scapy.modules.gnuradio import *
+
+from rflib import *
+
+sigstop=False
+
+def str_to_binary(s):
+    return ''.join(['%08d'%int(bin(ord(i))[2:]) for i in s])
+
+def invert(data):
+        datapost = ''
+        for i in range(len(data)):
+            datapost += chr(ord(data[i]) ^ 0xFF)
+        return datapost
+
+
+# Assumes first bit is starting (no leading 0 suppression)
+def binary_to_hex(b):
+    sb = (b[i:i+8] for i in range(0, len(b), 8)) # 8-bit blocks
+    return ''.join(chr(int(char, 2)) for char in sb)
+
+
+def hexdump(s):
+    return ":".join(x.encode('hex') for x in s)
+
+
+def get_manspec(kz, homeid, destid, preamble_len=80):
+    global sigstop
+    retranscount = 0
+    payload = None
+    request = ZWave(homeid=homeid, ackreq=1, dst=destid) / ZWaveManufacturerSpecific(cmd="GET")
+    ack = ZWave(homeid=homeid, headertype=3, dst=destid)
+
+    while not sigstop and retranscount < 2:
+        #transmit request
+        #print "Transmit Manspec", retranscount
+        retranscount+=1
+        kzutils.send_wireshark(request)
+        kz[1].inject(str(request), count=1, delay=0.1, preamble_len=preamble_len)
+
+        #wait for response
+        packetcount = 0
+        while not sigstop and packetcount < 3:
+            #print "Receive manspec", packetcount
+            packetcount+=1
+            try:
+                p = kz[0].pcap_next()
+            except EOFError:
+                #print "EOF"
+                break
+            if p != None:
+                kzutils.send_wireshark(p[1])
+                if calcfcs_r2(p[1]) == 0: # Check FCS, not safe for R3!
+                    response = ZWave(p[1])
+                    #check if response contains ManufacturerSpecfic Report
+                    if response.cmd_class == 0x72 and response.cmd == 0x05:
+                        #transmit ACK
+                        ack.seqn = response.seqn
+                        kz[1].inject(str(ack), count=3, delay=0.1)
+                        kzutils.send_wireshark(ack)
+                        payload = str(response[Raw]).encode("HEX")
+                        #Exit both while loops
+                        packetcount = 3
+                        retranscount = 2
+    return payload
+
+def get_version(kz, homeid, destid, preamble_len=80):
+    global sigstop
+    retranscount = 0
+    payload = None
+    request = ZWave(homeid=homeid, ackreq=1, dst=destid) / ZWaveVersion(cmd="GET")
+    ack = ZWave(homeid=homeid, headertype=3, dst=destid)
+    _kzd = KillerZeeDecode()
+
+    while not sigstop and retranscount < 2:
+        #transmit request
+        #print "Transmit Version", retranscount
+        retranscount+=1
+        kzutils.send_wireshark(request)
+        kz[1].inject(str(request), count=1, delay=0.1, preamble_len=preamble_len)
+
+        #wait for response
+        packetcount = 0
+        while not sigstop and packetcount < 3:
+            #print "Receive version", packetcount
+            packetcount+=1
+            try:
+                p = kz[0].pcap_next()
+            except EOFError:
+                #print "EOF"
+                break
+            if p != None:
+                kzutils.send_wireshark(p[1])
+                if calcfcs_r2(p[1]) == 0: # Check FCS, not safe for R3!
+                    response = ZWave(p[1])
+                    #check if response contains Version Report
+                    if response.cmd_class == 0x86 and response.cmd == 0x12:
+                        #transmit ACK
+                        ack.seqn = response.seqn
+                        kz[1].inject(str(ack), count=3, delay=0.1)
+                        kzutils.send_wireshark(ack)
+                        payload = str(response[Raw]).encode("HEX")
+                        #Exit both while loops
+                        packetcount = 3
+                        retranscount = 2
+    return payload
+
+def get_supported_command_classes(kz, homeid, destid, preamble_len=80):
+    global sigstop
+    retranscount = 0
+    payload = None
+    request = ZWave(homeid=homeid, ackreq=1, dst=destid) / ZWaveNodeInfo() / chr(2)
+    ack = ZWave(homeid=homeid, headertype=3, dst=destid)
+    _kzd = KillerZeeDecode()
+
+    while not sigstop and retranscount < 2:
+        #transmit request
+        #print "Transmit NIF", retranscount
+        retranscount+=1
+        kzutils.send_wireshark(request)
+        kz[1].inject(str(request), count=1, delay=0.1, preamble_len=preamble_len)
+
+        #wait for response
+        packetcount = 0
+        while not sigstop and packetcount < 3:
+            #print "Receive NIF", packetcount
+            packetcount+=1
+            try:
+                p = kz[0].pcap_next()
+            except EOFError:
+                #print "EOF"
+                break
+            if p != None:
+                kzutils.send_wireshark(p[1])
+                if calcfcs_r2(p[1]) == 0: # Check FCS, not safe for R3!
+                    response = ZWave(p[1])
+                    #check if response contains NIF
+                    if response.cmd_class == 1 and str(response[Raw])[0].encode("Hex") == "01": # Need a cleaner way to do this...
+                        #transmit ACK
+                        ack.seqn = response.seqn
+                        kz[1].inject(str(ack), count=3, delay=0.1)
+                        kzutils.send_wireshark(ack)
+                        payload = str(response[Raw])
+                        #Exit both while loops
+                        packetcount = 3
+                        retranscount = 2
+    return payload
+
+def sighandler(signal, frame):
+    global sigstop
+    sigstop=True
+
+if __name__ == "__main__":
+    signal(SIGINT, sighandler)
+    destid=None
+
+    # Command-line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-t', '--homeid', dest='homeid', action='store', help='target network HomeID')
+    parser.add_argument('-d', '--destid', dest='destid', action='store', type=int, help='target device (optional)')
+    parser.add_argument('-p', '--preamble', dest='preamble_len', action='store', type=int, default=80, help='preamble length in bits (optional)')
+    parser.add_argument('-r', '--rfprofile', dest='rfprofile', action='store', default="R2", help='specify the RF profile (one or R1, R2, or R3)')
+    parser.add_argument('-c', '--country', dest='countrycode', action='store', default="US", help='specify the 2-letter country code')
+
+    args = parser.parse_args()
+
+    if args.rfprofile is not None:
+        if args.rfprofile.upper() == 'R1':
+            args.rfprofile = RFPROFILE_R1
+        elif args.rfprofile.upper() == 'R2':
+            args.rfprofile = RFPROFILE_R2
+        elif args.rfprofile.upper() == 'R3':
+            args.rfprofile = RFPROFILE_R3
+        else:
+            print >>sys.stderr, "ERROR: Invalid RF Profile Specified: %s"%args.rfprofile
+            sys.exit(1)
+
+    if not args.homeid:
+        print >>sys.stderr, "Must specify a HomeID with -t"
+        sys.exit(1)
+    if len(args.homeid) != 8:
+        print >>sys.stderr, "Length of HomeID should be 4 bytes (8 hex characters)"
+        sys.exit(1)
+    homeid = args.homeid.decode('hex')
+
+
+    if args.destid is not None:
+        if args.destid > 0xff:
+            print >>sys.stderr, "Destination NodeID must be <= 232"
+            sys.exit(1)
+        destid = hex(args.destid)
+        print "Interrogating NodeID", args.destid
+    else:
+        destid = "\xff"
+        print "Targeting the broadcast address"
+
+    # When >1 RFCat devices are present, use 1 for receiving and 1 for transmitting
+    if len(getRfCatDevices()) > 1:
+        rx = KillerZee(device=0,countrycode=args.countrycode,rfprofile=args.rfprofile)
+        tx = KillerZee(device=1,countrycode=args.countrycode,rfprofile=args.rfprofile)
+    else:
+        #Configure 1 RFCat device to transmit and receive
+        rx = KillerZee(countrycode=args.countrycode,rfprofile=args.rfprofile)
+        tx = rx
+
+    kz = [rx, tx]
+    _kzd = KillerZeeDecode()
+
+    manspec = get_manspec(kz, int(args.homeid, 16), args.destid, args.preamble_len)
+    time.sleep(2)
+    version = get_version(kz, int(args.homeid, 16), args.destid, args.preamble_len)
+    time.sleep(2)
+    nif = get_supported_command_classes(kz, int(args.homeid, 16), args.destid, args.preamble_len)
+    time.sleep(2)
+
+    #Decode ManufacturerSpecific Report payload
+    manufacturer, productname = _kzd.get_manufacturer_specific(manspec)
+    if manspec is None: # No response was received
+        manufacturer = "Unknown"
+        productname = "Unknown"
+    elif manufacturer is None: # Response was received, but the manufacturer in not known
+        manufacturer = "Unknown (0x" + manspec[:4] + ")"
+        productname = "Unknown (0x" + manspec[4:8] + " 0x" + manspec[8:] + ")"
+    elif productname is None: # Manufacturer is known, but product ID and product type is not
+        manufacturer = manufacturer + " (0x" + manspec[:4] + ")"
+        productname = "Unknown (0x" + manspec[4:8] + " 0x" + manspec[8:] + ")"
+    else: # Everything is good
+        manufacturer = manufacturer + " (0x" + manspec[:4] + ")"
+        productname = productname + " (0x" + manspec[4:8] + " 0x" + manspec[8:] + ")"
+    print "\tManufacturer:", manufacturer
+    print "\tProduct Name:", productname
+
+
+    #Decode Version Report payload
+    librarytype, protoversion, protosubversion, appversion, appsubversion = _kzd.get_version(version)
+    if version is None:
+        librarytype = "Unknown"
+        protoversion = "Unknown"
+        protosubversion = "Unknown"
+        appversion = "Unknown"
+        appsubversion = "Unknown"
+    if len(librarytype) > 2 and librarytype != "Unknown":
+        librarytype = librarytype + " (0x" + version[:2] + ")"
+    print "\tLibrary Type:", librarytype
+    print "\tProtocol Version/Sub-version: " + protoversion + " / " + protosubversion
+    print "\tApplication Version/Sub-version: " + appversion + " / " + appsubversion
+
+
+    #Decode NIF payload to get the supported command classes
+    cmd_classes = _kzd.get_supported_command_classes(nif)
+    print "\tSupported Command Classes:"
+    for cmd_class in cmd_classes:
+        print "\t\t", cmd_classes[cmd_class] + " (" + hex(cmd_class) + ")"
+
+
+    print "EXIT"
